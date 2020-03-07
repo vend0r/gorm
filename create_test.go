@@ -27,7 +27,9 @@ func TestCreate(t *testing.T) {
 	}
 
 	var newUser User
-	DB.First(&newUser, user.Id)
+	if err := DB.First(&newUser, user.Id).Error; err != nil {
+		t.Errorf("No error should happen, but got %v", err)
+	}
 
 	if !reflect.DeepEqual(newUser.PasswordHash, []byte{'f', 'a', 'k', '4'}) {
 		t.Errorf("User's PasswordHash should be saved ([]byte)")
@@ -38,7 +40,7 @@ func TestCreate(t *testing.T) {
 	}
 
 	if newUser.UserNum != Num(111) {
-		t.Errorf("User's UserNum should be saved (custom type)")
+		t.Errorf("User's UserNum should be saved (custom type), but got %v", newUser.UserNum)
 	}
 
 	if newUser.Latitude != float {
@@ -60,6 +62,17 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateEmptyStrut(t *testing.T) {
+	type EmptyStruct struct {
+		ID uint
+	}
+	DB.AutoMigrate(&EmptyStruct{})
+
+	if err := DB.Create(&EmptyStruct{}).Error; err != nil {
+		t.Errorf("No error should happen when creating user, but got %v", err)
+	}
+}
+
 func TestCreateWithExistingTimestamp(t *testing.T) {
 	user := User{Name: "CreateUserExistingTimestamp"}
 
@@ -68,23 +81,63 @@ func TestCreateWithExistingTimestamp(t *testing.T) {
 	user.UpdatedAt = timeA
 	DB.Save(&user)
 
-	if user.CreatedAt.Format(time.RFC3339) != timeA.Format(time.RFC3339) {
+	if user.CreatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
 		t.Errorf("CreatedAt should not be changed")
 	}
 
-	if user.UpdatedAt.Format(time.RFC3339) != timeA.Format(time.RFC3339) {
+	if user.UpdatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
 		t.Errorf("UpdatedAt should not be changed")
 	}
 
 	var newUser User
 	DB.First(&newUser, user.Id)
 
-	if newUser.CreatedAt.Format(time.RFC3339) != timeA.Format(time.RFC3339) {
+	if newUser.CreatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
 		t.Errorf("CreatedAt should not be changed")
 	}
 
-	if newUser.UpdatedAt.Format(time.RFC3339) != timeA.Format(time.RFC3339) {
+	if newUser.UpdatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
 		t.Errorf("UpdatedAt should not be changed")
+	}
+}
+
+func TestCreateWithNowFuncOverride(t *testing.T) {
+	user1 := User{Name: "CreateUserTimestampOverride"}
+
+	timeA := now.MustParse("2016-01-01")
+
+	// do DB.New() because we don't want this test to affect other tests
+	db1 := DB.New()
+	// set the override to use static timeA
+	db1.SetNowFuncOverride(func() time.Time {
+		return timeA
+	})
+	// call .New again to check the override is carried over as well during clone
+	db1 = db1.New()
+
+	db1.Save(&user1)
+
+	if user1.CreatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
+		t.Errorf("CreatedAt be using the nowFuncOverride")
+	}
+	if user1.UpdatedAt.UTC().Format(time.RFC3339) != timeA.UTC().Format(time.RFC3339) {
+		t.Errorf("UpdatedAt be using the nowFuncOverride")
+	}
+
+	// now create another user with a fresh DB.Now() that doesn't have the nowFuncOverride set
+	// to make sure that setting it only affected the above instance
+
+	user2 := User{Name: "CreateUserTimestampOverrideNoMore"}
+
+	db2 := DB.New()
+
+	db2.Save(&user2)
+
+	if user2.CreatedAt.UTC().Format(time.RFC3339) == timeA.UTC().Format(time.RFC3339) {
+		t.Errorf("CreatedAt no longer be using the nowFuncOverride")
+	}
+	if user2.UpdatedAt.UTC().Format(time.RFC3339) == timeA.UTC().Format(time.RFC3339) {
+		t.Errorf("UpdatedAt no longer be using the nowFuncOverride")
 	}
 }
 
@@ -214,5 +267,22 @@ func TestOmitWithCreate(t *testing.T) {
 	if queryuser.BillingAddressID.Int64 != 0 || queryuser.ShippingAddressId == 0 ||
 		queryuser.CreditCard.ID != 0 || len(queryuser.Emails) != 0 {
 		t.Errorf("Should not create omitted relationships")
+	}
+}
+
+func TestCreateIgnore(t *testing.T) {
+	float := 35.03554004971999
+	now := time.Now()
+	user := User{Name: "CreateUser", Age: 18, Birthday: &now, UserNum: Num(111), PasswordHash: []byte{'f', 'a', 'k', '4'}, Latitude: float}
+
+	if !DB.NewRecord(user) || !DB.NewRecord(&user) {
+		t.Error("User should be new record before create")
+	}
+
+	if count := DB.Create(&user).RowsAffected; count != 1 {
+		t.Error("There should be one record be affected when create record")
+	}
+	if DB.Dialect().GetName() == "mysql" && DB.Set("gorm:insert_modifier", "IGNORE").Create(&user).Error != nil {
+		t.Error("Should ignore duplicate user insert by insert modifier:IGNORE ")
 	}
 }
